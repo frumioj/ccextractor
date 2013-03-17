@@ -1,0 +1,362 @@
+diff -Naur ccextractor.0.63/src/608.cpp ccextractor.0.63.jk/src/608.cpp
+--- ccextractor.0.63/src/608.cpp	2012-08-16 05:15:32.000000000 -0400
++++ ccextractor.0.63.jk/src/608.cpp	2012-09-20 12:18:36.000000000 -0400
+@@ -53,6 +53,11 @@
+ </HEAD>\n\n\
+ <BODY>\n";
+ 
++const char *smptett_header = 
++"<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n\
++<tt xmlns=\"http://www.w3.org/ns/ttml\" xml:lang=\"en\">\n\
++<body>\n<div>\n" ;
++
+ const char *command_type[] =
+ {
+     "Unknown",
+@@ -209,19 +214,28 @@
+ 
+ void write_subtitle_file_footer (struct s_write *wb)
+ {
+-    switch (write_format)
++  switch (write_format)
+     {
+-        case OF_SAMI:
+-            sprintf ((char *) str,"</BODY></SAMI>\n");
+-            if (encoding!=ENC_UNICODE)
+-            {
+-                dbg_print(DMT_608, "\r%s\n", str);
+-            }
+-            enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
+-            write (wb->fh, enc_buffer,enc_buffer_used);
+-            break;
+-        default: // Nothing to do. Only SAMI has a footer
+-            break;
++    case OF_SAMI:
++      sprintf ((char *) str,"</BODY></SAMI>\n");
++      if (encoding!=ENC_UNICODE)
++        {
++          dbg_print(DMT_608, "\r%s\n", str);
++        }
++      enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++      write (wb->fh, enc_buffer,enc_buffer_used);
++      break;
++    case OF_SMPTETT:
++      sprintf ((char *) str,"</div></body></tt>\n");
++      if (encoding!=ENC_UNICODE)
++        {
++          dbg_print(DMT_608, "\r%s\n", str);
++        }
++      enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++      write (wb->fh, enc_buffer,enc_buffer_used);
++      break;
++    default: // Nothing to do. Only SAMI has a footer
++      break;
+     }
+ }
+ 
+@@ -238,6 +252,12 @@
+             enc_buffer_used=encode_line (enc_buffer,(unsigned char *) sami_header);
+             write (wb->fh, enc_buffer,enc_buffer_used);
+             break;
++        case OF_SMPTETT: // This header brought to you by McPoodle's CCASDI  
++            //fprintf_encoded (wb->fh, sami_header);
++            GUARANTEE(strlen (smptett_header)*3);
++            enc_buffer_used=encode_line (enc_buffer,(unsigned char *) smptett_header);
++            write (wb->fh, enc_buffer,enc_buffer_used);
++            break;
+         case OF_RCWT: // Write header
+             write (wb->fh, rcwt_header, sizeof(rcwt_header));
+             break;
+@@ -345,6 +365,11 @@
+                     try_to_add_start_credits(wb);
+                 wrote_something = write_cc_buffer_as_sami (data,wb);
+                 break;
++            case OF_SMPTETT:
++                if (!startcredits_displayed && start_credits_text!=NULL)
++                    try_to_add_start_credits(wb);
++                wrote_something = write_cc_buffer_as_smptett (data,wb);
++                break;
+             case OF_TRANSCRIPT:
+                 wrote_something = write_cc_buffer_as_transcript (data,wb);
+                 break;
+diff -Naur ccextractor.0.63/src/608.h ccextractor.0.63.jk/src/608.h
+--- ccextractor.0.63/src/608.h	2012-08-16 05:15:33.000000000 -0400
++++ ccextractor.0.63.jk/src/608.h	2012-09-12 15:48:18.000000000 -0400
+@@ -19,6 +19,8 @@
+ void correct_case (int line_num, struct eia608_screen *data);
+ int write_cc_buffer_as_sami (struct eia608_screen *data, struct s_write *wb);
+ void write_stringz_as_sami (char *string, struct s_write *wb, LLONG ms_start, LLONG ms_end);
++int write_cc_buffer_as_smptett (struct eia608_screen *data, struct s_write *wb);
++void write_stringz_as_smptett (char *string, struct s_write *wb, LLONG ms_start, LLONG ms_end);
+ unsigned encode_line (unsigned char *buffer, unsigned char *text);
+ void correct_case (int line_num, struct eia608_screen *data);
+ void capitalize (int line_num, struct eia608_screen *data);
+diff -Naur ccextractor.0.63/src/608_helpers.cpp ccextractor.0.63.jk/src/608_helpers.cpp
+--- ccextractor.0.63/src/608_helpers.cpp	2012-08-16 05:15:34.000000000 -0400
++++ ccextractor.0.63.jk/src/608_helpers.cpp	2012-09-12 15:33:26.000000000 -0400
+@@ -354,6 +354,9 @@
+         case OF_SAMI:
+             write_stringz_as_sami(end_credits_text,wb,st,end);
+             break;
++    case OF_SMPTETT:
++      write_stringz_as_smptett(end_credits_text,wb,st,end);
++      break ;
+         default:
+             // Do nothing for the rest
+             break;
+@@ -406,6 +409,9 @@
+         case OF_SAMI:
+             write_stringz_as_sami(start_credits_text,wb,st,end);
+             break;
++        case OF_SMPTETT:
++            write_stringz_as_smptett(start_credits_text,wb,st,end);
++            break;
+         default:
+             // Do nothing for the rest
+             break;
+diff -Naur ccextractor.0.63/src/608_smptett.cpp ccextractor.0.63.jk/src/608_smptett.cpp
+--- ccextractor.0.63/src/608_smptett.cpp	1969-12-31 19:00:00.000000000 -0500
++++ ccextractor.0.63.jk/src/608_smptett.cpp	2012-11-19 12:36:08.000000000 -0500
+@@ -0,0 +1,156 @@
++#include "ccextractor.h"
++
++// Produces minimally-compliant SMPTE Timed Text (W3C TTML)
++// format-compatible output 
++
++// See http://www.w3.org/TR/ttaf1-dfxp/ and
++// https://www.smpte.org/sites/default/files/st2052-1-2010.pdf
++
++// Copyright (C) 2012 John Kemp
++
++// This program is free software; you can redistribute it and/or
++// modify it under the terms of the GNU General Public License
++// as published by the Free Software Foundation; either version 2
++// of the License, or (at your option) any later version.
++
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License
++// along with this program; if not, write to the Free Software
++// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
++
++void write_stringz_as_smptett (char *string, struct s_write *wb, LLONG ms_start, LLONG ms_end)
++{
++    unsigned h1,m1,s1,ms1;
++    unsigned h2,m2,s2,ms2;
++
++    mstotime (ms_start,&h1,&m1,&s1,&ms1);
++    mstotime (ms_end-1,&h2,&m2,&s2,&ms2);
++
++    sprintf ((char *) str,"<p begin=\"%02u:%02u:%02u,%03u\" end=\"%02u:%02u:%02u,%03u\">\r\n",h1,m1,s1,ms1, h2,m2,s2,ms2);
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    write (wb->fh, enc_buffer,enc_buffer_used);		
++    int len=strlen (string);
++    unsigned char *unescaped= (unsigned char *) malloc (len+1); 
++    unsigned char *el = (unsigned char *) malloc (len*3+1); // Be generous
++    if (el==NULL || unescaped==NULL)
++        fatal (EXIT_NOT_ENOUGH_MEMORY, "In write_stringz_as_sami() - not enough memory.\n");
++    int pos_r=0;
++    int pos_w=0;
++    // Scan for \n in the string and replace it with a 0
++    while (pos_r<len)
++    {
++        if (string[pos_r]=='\\' && string[pos_r+1]=='n')
++        {
++            unescaped[pos_w]=0;
++            pos_r+=2;            
++        }
++        else
++        {
++            unescaped[pos_w]=string[pos_r];
++            pos_r++;
++        }
++        pos_w++;
++    }
++    unescaped[pos_w]=0;
++    // Now read the unescaped string (now several string'z and write them)    
++    unsigned char *begin=unescaped;
++    while (begin<unescaped+len)
++    {
++        unsigned int u = encode_line (el, begin);
++        if (encoding!=ENC_UNICODE)
++        {
++            dbg_print(DMT_608, "\r");
++            dbg_print(DMT_608, "%s\n",subline);
++        }
++        write (wb->fh, el, u);        
++        //write (wb->fh, encoded_br, encoded_br_length);
++        
++        write (wb->fh, encoded_crlf, encoded_crlf_length);        
++        begin+= strlen ((const char *) begin)+1;
++    }
++
++    sprintf ((char *) str,"</p>\n");
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    write (wb->fh, enc_buffer,enc_buffer_used);
++    sprintf ((char *) str,"<p begin=\"%02u:%02u:%02u,%03u\">\n\n",h2,m2,s2,ms2);
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    write (wb->fh, enc_buffer,enc_buffer_used);
++    sprintf ((char *) str,"</p>\n");
++}
++
++
++
++int write_cc_buffer_as_smptett (struct eia608_screen *data, struct s_write *wb)
++{
++    unsigned h1,m1,s1,ms1;
++    unsigned h2,m2,s2,ms2;
++    int wrote_something=0;
++    LLONG startms = wb->data608->current_visible_start_ms;
++
++    startms+=subs_delay;
++    if (startms<0) // Drop screens that because of subs_delay start too early
++        return 0; 
++
++    LLONG endms   = get_visible_end()+subs_delay;
++    endms--; // To prevent overlapping with next line.
++    mstotime (startms,&h1,&m1,&s1,&ms1);
++    mstotime (endms-1,&h2,&m2,&s2,&ms2);
++
++    sprintf ((char *) str,"<p begin=\"%02u:%02u:%02u,%03u\" end=\"%02u:%02u:%02u,%03u\">\n",h1,m1,s1,ms1, h2,m2,s2,ms2);
++
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    write (wb->fh, enc_buffer,enc_buffer_used);
++    for (int i=0;i<15;i++)
++    {
++        if (data->row_used[i])
++        {				
++            int length = get_decoder_line_encoded (subline, i, data);
++            if (encoding!=ENC_UNICODE)
++            {
++                dbg_print(DMT_608, "\r");
++                dbg_print(DMT_608, "%s\n",subline);
++            }
++            write (wb->fh, subline, length);            
++            wrote_something=1;
++            //if (i!=14)            
++              //write (wb->fh, encoded_br, encoded_br_length);            
++            write (wb->fh,encoded_crlf, encoded_crlf_length);
++        }
++    }
++    sprintf ((char *) str,"</p>\n");
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    write (wb->fh, enc_buffer,enc_buffer_used);
++
++    if (encoding!=ENC_UNICODE)
++    {
++        dbg_print(DMT_608, "\r%s\n", str);
++    }
++    enc_buffer_used=encode_line (enc_buffer,(unsigned char *) str);
++    //write (wb->fh, enc_buffer,enc_buffer_used);
++
++    return wrote_something;
++}
+diff -Naur ccextractor.0.63/src/ccextractor.cpp ccextractor.0.63.jk/src/ccextractor.cpp
+--- ccextractor.0.63/src/ccextractor.cpp	2012-08-16 05:33:10.000000000 -0400
++++ ccextractor.0.63.jk/src/ccextractor.cpp	2012-09-12 15:40:53.000000000 -0400
+@@ -238,6 +238,9 @@
+         case OF_SAMI:
+             extension = ".smi";
+             break;
++        case OF_SMPTETT:
++            extension = ".ttml";
++            break;
+         case OF_TRANSCRIPT:
+             extension = ".txt";
+             break;
+@@ -659,7 +662,7 @@
+ 
+     if (wbout1.fh!=-1)
+     {
+-        if (write_format==OF_SAMI || write_format==OF_SRT || write_format==OF_TRANSCRIPT)
++        if (write_format==OF_SMPTETT || write_format==OF_SAMI || write_format==OF_SRT || write_format==OF_TRANSCRIPT)
+         {
+             handle_end_of_data (&wbout1);
+         }
+@@ -674,7 +677,7 @@
+     }
+     if (wbout2.fh!=-1)
+     {
+-        if (write_format==OF_SAMI || write_format==OF_SRT || write_format==OF_TRANSCRIPT)
++        if (write_format==OF_SMPTETT || write_format==OF_SAMI || write_format==OF_SRT || write_format==OF_TRANSCRIPT)
+         {
+             handle_end_of_data (&wbout2);
+         }
+diff -Naur ccextractor.0.63/src/ccextractor.h ccextractor.0.63.jk/src/ccextractor.h
+--- ccextractor.0.63/src/ccextractor.h	2012-08-16 05:33:10.000000000 -0400
++++ ccextractor.0.63.jk/src/ccextractor.h	2012-09-12 12:09:45.000000000 -0400
+@@ -121,12 +121,13 @@
+ 
+ enum output_format
+ {
+-    OF_RAW	= 0,
+-    OF_SRT	= 1,
+-    OF_SAMI = 2,
+-    OF_TRANSCRIPT = 3,
+-    OF_RCWT = 4,
+-	OF_NULL = 5
++  OF_RAW	= 0,
++  OF_SRT	= 1,
++  OF_SAMI = 2,
++  OF_TRANSCRIPT = 3,
++  OF_RCWT = 4,
++  OF_NULL = 5,
++  OF_SMPTETT = 6
+ };
+ 
+ enum stream_mode_enum
+@@ -701,4 +702,4 @@
+ extern uint32_t tlt_frames_produced;
+ void tlt_process_pes_packet(uint8_t *buffer, uint16_t size) ;
+ void telxcc_init(void);
+-void telxcc_close(void);
+\ No newline at end of file
++void telxcc_close(void);
+diff -Naur ccextractor.0.63/src/output.cpp ccextractor.0.63.jk/src/output.cpp
+--- ccextractor.0.63/src/output.cpp	2012-08-16 05:15:40.000000000 -0400
++++ ccextractor.0.63.jk/src/output.cpp	2012-09-12 15:41:38.000000000 -0400
+@@ -32,7 +32,8 @@
+ 		if (wb)
+ 			writeraw (data,length,wb);
+ 	}
+-    else if (write_format==OF_SAMI ||
++    else if (write_format==OF_SMPTETT || 
++             write_format==OF_SAMI ||
+              write_format==OF_SRT ||
+              write_format==OF_TRANSCRIPT ||
+ 			 write_format==OF_NULL)
+diff -Naur ccextractor.0.63/src/params.cpp ccextractor.0.63.jk/src/params.cpp
+--- ccextractor.0.63/src/params.cpp	2012-08-16 05:15:42.000000000 -0400
++++ ccextractor.0.63.jk/src/params.cpp	2012-09-12 12:02:38.000000000 -0400
+@@ -281,6 +281,8 @@
+         write_format=OF_RAW;
+         rawmode=1;
+     }
++    else if (strcmp (format, "smptett")==0)
++      write_format=OF_SMPTETT ;
+     else
+         fatal (EXIT_MALFORMED_PARAMETER, "Unknown output file format: %s\n", format);
+ }
